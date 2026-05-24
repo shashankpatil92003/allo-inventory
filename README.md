@@ -1,36 +1,82 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Allo Inventory — Take-Home Exercise
 
-## Getting Started
+A Next.js inventory reservation system with concurrency-safe stock holds.
 
-First, run the development server:
+## Live Demo
+> Add your Vercel URL here after deployment
 
-```bash
+## Local Setup
+
+### 1. Clone the repo
+git clone <your-repo-url>
+cd allo-inventory
+
+### 2. Install dependencies
+npm install
+
+### 3. Set up environment variables
+cp .env.example .env
+
+Fill in the following in `.env`:
+- `DATABASE_URL` — PostgreSQL connection string (Neon/Supabase)
+- `UPSTASH_REDIS_REST_URL` — Upstash Redis REST URL
+- `UPSTASH_REDIS_REST_TOKEN` — Upstash Redis token
+- `CRON_SECRET` — any random secret string
+
+### 4. Run migrations and seed
+npx prisma migrate dev
+npx prisma db seed
+
+### 5. Start the dev server
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open http://localhost:3000
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+---
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## How Reservation Expiry Works
 
-## Learn More
+When a reservation is created, it gets an `expiresAt` timestamp 10 minutes in the future.
 
-To learn more about Next.js, take a look at the following resources:
+**In production (Vercel):** A cron job hits `/api/cron/cleanup` every minute. It finds all
+PENDING reservations where `expiresAt < now`, marks them RELEASED, and decrements
+the `reserved` count on the stock row so units become available again.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+**In development:** The cleanup also runs lazily on every `GET /api/products` and
+`POST /api/reservations` request, so expired reservations are released on the next
+incoming request.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+---
 
-## Deploy on Vercel
+## How Concurrency is Handled
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+The `POST /api/reservations` endpoint uses a PostgreSQL `SELECT FOR UPDATE` inside a
+Prisma transaction. This row-level lock ensures that if two requests arrive simultaneously
+for the last unit of a SKU, Postgres serializes them — the second transaction waits,
+then sees `reserved >= total` and returns a 409. Exactly one request succeeds.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+---
+
+## Idempotency (Bonus)
+
+The `POST /api/reservations` endpoint supports an optional `Idempotency-Key` header.
+If a client retries with the same key, the server returns the original response from
+Redis without creating a duplicate reservation. Keys are cached for 24 hours.
+
+---
+
+## Trade-offs & What I'd Do Differently
+
+- **Expiry:** Lazy cleanup is simple but means stock isn't released instantly when a
+  reservation expires. The Vercel cron brings max lag to ~60 seconds, which is acceptable.
+  With more time, I'd use a Redis key with a TTL and a keyspace notification to trigger
+  instant cleanup.
+
+- **Idempotency scope:** Currently only the reserve endpoint is idempotent. With more
+  time I'd add it to confirm as well.
+
+- **No auth:** There's no user authentication. In production each reservation would be
+  tied to a user session.
+
+- **Quantity fixed at 1:** The UI always reserves 1 unit. The API supports any quantity —
+  a quantity picker in the UI would be a small addition.
